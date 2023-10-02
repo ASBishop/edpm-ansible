@@ -1,0 +1,90 @@
+---
+# Copyright 2023 Red Hat, Inc.
+# All Rights Reserved.
+#
+# Licensed under the Apache License, Version 2.0 (the "License"); you may
+# not use this file except in compliance with the License. You may obtain
+# a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS, WITHOUT
+# WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the
+# License for the specific language governing permissions and limitations
+# under the License.
+
+
+- name: Check if lvm2 is installed
+  ansible.builtin.command: rpm -q lvm2
+  failed_when: false
+  changed_when: false
+  register: lvm2_pkg_check
+
+- name: Check if /etc/lvm/devices exists
+  ansible.builtin.stat:
+    path: /etc/lvm/devices
+  register: lvm_devices_dir
+
+- name: Generate the lvm2 filter
+  when:
+    - lvm2_pkg_check.rc is defined
+    - lvm2_pkg_check.rc == 0
+    - not lvm_devices_dir.stat.exists
+    - edpm_lvmfilter_enabled or edpm_lvmfilter_dry_run
+  block:
+    - name: Collect ansible devices
+      become: true
+      setup:
+        gather_subset:
+          - '!all'
+          - devices
+        filter: 'ansible_devices'
+
+    - name: Collect in-use lvm2 devices
+      become: true
+      lvm2_active_pvs_facts:
+
+    - name: Set allowed_devices
+      set_fact:
+        allowed_devices: "{{ (ansible_facts['lvm2_active_pvs'] | default([]) | list)
+                         | intersect(ansible_facts['devices'].keys())
+                         + (edpm_lvmfilter_devices_allowlist | default([]))
+                         | unique }}"
+
+    - name: Build lvm2 allow list
+      set_fact:
+        lvm2_allow_list: "{{ allowed_devices
+                         | map('regex_replace', '(.+)', 'a|\\1|') | list }}"
+
+    - name: Build lvm2 deny list
+      set_fact:
+        lvm2_deny_list: "{{ edpm_lvmfilter_devices_denylist | default([])
+                        | map('regex_replace', '(.+)', 'r|\\1|') | list }}"
+
+    - name: Build lvm2 filter
+      set_fact:
+        lvm2_filter: "\"{{ (lvm2_allow_list + lvm2_deny_list) | join('\",\"') }}\""
+
+    - name: Regenerate lvm config
+      become: true
+      ansible.builtin.command: >
+        lvmconfig -f /tmp/edpm_lvmfilter.conf
+        --mergedconfig --withgeneralpreamble --withspaces
+        --withsummary --withcomments --ignorelocal --showdeprecated
+        --config devices/global_filter='[{{ lvm2_filter }}]'
+
+    - name: Copy new lvm.conf in place
+      when:
+        - edpm_lvmfilter_enabled
+      become: true
+      ansible.builtin.copy:
+        remote_src: true
+        src: /tmp/edpm_lvmfilter.conf
+        dest: /etc/lvm/lvm.conf
+        owner: root
+        group: root
+        mode: '0644'
+        backup: true
+      notify:
+        - Refresh LVM caches

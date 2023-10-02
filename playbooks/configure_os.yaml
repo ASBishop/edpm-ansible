@@ -69,3 +69,9 @@
         tasks_from: configure.yml
       tags:
         - edpm_firewall
+    - name: Configure edpm_lvmfilter
+      import_role:
+        name: osp.edpm.edpm_lvmfilter
+        tasks_from: configure.yml
+      tags:
+        - edpm_lvmfilter
